@@ -1,309 +1,211 @@
-// server.js - Proxy para Bac Bo Live (adaptado para Railway)
+// server.js - Proxy COMPLETO que intercepta todas as requisições
 const express = require('express');
 const axios = require('axios');
 const app = express();
 
-// Railway define a porta automaticamente
 const PORT = process.env.PORT || 3000;
 
 // Headers que o servidor espera
 const HEADERS = {
     'Referer': 'https://www.casino.org/',
     'Origin': 'https://www.casino.org',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
     'Accept': '*/*',
     'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+    'Connection': 'keep-alive',
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'cross-site'
 };
 
-const STREAM_BASE = 'https://live101.egprom.com/app/30/amlst:bacbor1_bi_auto/';
+const STREAM_BASE = 'https://live101.egprom.com/app/30/';
 
-// Proxy do arquivo .m3u8
-app.get('/playlist.m3u8', async (req, res) => {
-    console.log('📡 Solicitando playlist...');
+// Proxy principal - retorna a playlist inicial
+app.get('/bacbo/playlist.m3u8', async (req, res) => {
+    console.log('📡 Playlist principal solicitada');
     
     try {
-        const response = await axios.get(STREAM_BASE + 'playlist.m3u8', {
+        const response = await axios.get(STREAM_BASE + 'amlst:bacbor1_bi_auto/playlist.m3u8', {
             headers: HEADERS,
-            responseType: 'text'
+            responseType: 'text',
+            timeout: 10000
         });
         
         let playlist = response.data;
         
-        // Reescreve as URLs dos segmentos .ts para passar pelo proxy
-        const baseUrl = `https://${req.get('host')}`;
+        // Reescreve TODAS as URLs .m3u8 e .ts para passar pelo proxy
+        // Exemplo: "bacbor1_bi_hi/media.m3u8?sid=xxx" → "/bacbo/segment?url=..."
+        playlist = playlist.replace(/([a-zA-Z0-9_\/\-]+\.m3u8\?[^\s]+)/g, (match) => {
+            const encoded = encodeURIComponent(match);
+            console.log(`  ↳ Playlist secundária encontrada: ${match.substring(0, 50)}...`);
+            return `/bacbo/playlist?url=${encoded}`;
+        });
+        
         playlist = playlist.replace(/([a-zA-Z0-9_\-]+\.ts)/g, (match) => {
-            console.log(`  ↳ Segmento encontrado: ${match}`);
-            return `${baseUrl}/segmento/${match}`;
+            console.log(`  ↳ Segmento TS encontrado: ${match}`);
+            return `/bacbo/segment?url=${encodeURIComponent(match)}`;
         });
         
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(playlist);
-        console.log('✅ Playlist enviada');
+        console.log('✅ Playlist principal enviada');
         
     } catch (error) {
-        console.error('❌ Erro na playlist:', error.message);
+        console.error('❌ Erro:', error.message);
         res.status(500).send('Erro ao carregar playlist');
     }
 });
 
-// Proxy dos segmentos .ts
-app.get('/segmento/:nome', async (req, res) => {
-    const segmentoNome = req.params.nome;
-    const segmentoUrl = STREAM_BASE + segmentoNome;
+// Proxy para playlists secundárias (media.m3u8)
+app.get('/bacbo/playlist', async (req, res) => {
+    const originalUrl = req.query.url;
+    if (!originalUrl) {
+        return res.status(400).send('URL não fornecida');
+    }
     
-    console.log(`🎬 Baixando segmento: ${segmentoNome}`);
+    const fullUrl = STREAM_BASE + originalUrl;
+    console.log(`📡 Playlist secundária: ${originalUrl.substring(0, 60)}...`);
     
     try {
-        const response = await axios({
-            method: 'get',
-            url: segmentoUrl,
+        const response = await axios.get(fullUrl, {
             headers: HEADERS,
-            responseType: 'stream',
+            responseType: 'text',
             timeout: 10000
         });
         
-        res.setHeader('Content-Type', 'video/mp2t');
-        response.data.pipe(res);
+        let playlist = response.data;
+        
+        // Reescreve os segmentos .ts
+        playlist = playlist.replace(/([a-zA-Z0-9_\-]+\.ts)/g, (match) => {
+            return `/bacbo/segment?url=${encodeURIComponent(match)}`;
+        });
+        
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(playlist);
         
     } catch (error) {
-        console.error(`❌ Erro no segmento ${segmentoNome}:`, error.message);
-        res.status(500).send('Erro no segmento');
+        console.error(`❌ Erro na playlist secundária:`, error.message);
+        res.status(500).send('Erro na playlist secundária');
     }
 });
 
-// Página principal
+// Proxy para segmentos .ts
+app.get('/bacbo/segment', async (req, res) => {
+    const segmentName = req.query.url;
+    if (!segmentName) {
+        return res.status(400).send('Nome do segmento não fornecido');
+    }
+    
+    // Tenta encontrar a playlist pai para construir o caminho correto
+    const possiblePaths = [
+        `amlst:bacbor1_bi_auto/${segmentName}`,
+        `bacbor1_bi_hi/${segmentName}`,
+        `bacbor1_bi_med/${segmentName}`,
+        `bacbor1_bi_low/${segmentName}`
+    ];
+    
+    for (const path of possiblePaths) {
+        const fullUrl = STREAM_BASE + path;
+        console.log(`🎬 Tentando segmento: ${path}`);
+        
+        try {
+            const response = await axios({
+                method: 'get',
+                url: fullUrl,
+                headers: HEADERS,
+                responseType: 'stream',
+                timeout: 15000
+            });
+            
+            res.setHeader('Content-Type', 'video/mp2t');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            response.data.pipe(res);
+            console.log(`  ✅ Segmento encontrado: ${path}`);
+            return;
+            
+        } catch (error) {
+            if (error.response?.status !== 404) {
+                console.log(`  ⚠️ Erro em ${path}: ${error.message}`);
+            }
+            // Continua tentando outros paths
+        }
+    }
+    
+    console.error(`❌ Segmento não encontrado: ${segmentName}`);
+    res.status(404).send('Segmento não encontrado');
+});
+
+// Página HTML
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
 <html>
 <head>
     <title>Bac Bo Live</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            background: #0a0a0a;
-            font-family: 'Segoe UI', Arial, sans-serif;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-        .container {
-            width: 100%;
-            max-width: 1280px;
-            background: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 0 30px rgba(0,0,0,0.5);
-            margin: 20px;
-        }
-        .player-wrapper {
-            position: relative;
-            background: #000;
-        }
-        video {
-            width: 100%;
-            height: auto;
-            display: block;
-        }
-        .info {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            background: rgba(0,0,0,0.8);
-            color: #0f0;
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-family: monospace;
-            font-size: 13px;
-            z-index: 10;
-            backdrop-filter: blur(5px);
-            pointer-events: none;
-        }
-        .status-dot {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background-color: #0f0;
-            animation: pulse 1.5s infinite;
-            margin-right: 8px;
-        }
-        @keyframes pulse {
-            0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(1.2); }
-            100% { opacity: 1; transform: scale(1); }
-        }
-        .controls {
-            padding: 12px;
-            background: #1a1a1a;
-            display: flex;
-            gap: 10px;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        button {
-            background: #333;
-            color: white;
-            border: none;
-            padding: 10px 24px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: all 0.2s;
-            font-weight: bold;
-        }
-        button:hover {
-            background: #555;
-            transform: scale(1.02);
-        }
-        button.primary {
-            background: #4CAF50;
-        }
-        button.primary:hover {
-            background: #45a049;
-        }
-        .footer {
-            text-align: center;
-            padding: 12px;
-            background: #111;
-            color: #666;
-            font-size: 12px;
-            border-top: 1px solid #222;
-        }
-        .footer a {
-            color: #4CAF50;
-            text-decoration: none;
-        }
-        @media (max-width: 768px) {
-            button { padding: 8px 16px; font-size: 12px; }
-            .info { font-size: 10px; bottom: 10px; left: 10px; }
-        }
+        body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .player { width: 100%; max-width: 1200px; background: #000; }
+        video { width: 100%; height: auto; }
+        .info { position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: #0f0; padding: 5px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="player-wrapper">
-            <video id="video" controls autoplay playsinline></video>
-            <div class="info">
-                <span class="status-dot"></span>
-                <span id="statusText">Conectando...</span>
-            </div>
-        </div>
-        <div class="controls">
-            <button onclick="document.getElementById('video').play()">▶️ Play</button>
-            <button onclick="document.getElementById('video').pause()">⏸️ Pause</button>
-            <button onclick="recarregar()" class="primary">🔄 Recarregar</button>
-        </div>
-        <div class="footer">
-            🎲 Bac Bo Live | Stream via Proxy
-        </div>
+    <div class="player">
+        <video id="video" controls autoplay playsinline></video>
+        <div class="info">🎲 Bac Bo Live | Proxy Ativo</div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
         const video = document.getElementById('video');
-        const statusText = document.getElementById('statusText');
-        let reconnectAttempts = 0;
+        const streamUrl = '/bacbo/playlist.m3u8';
         
-        function recarregar() {
-            statusText.innerHTML = '🔄 Recarregando...';
-            reconnectAttempts = 0;
-            carregarStream();
-        }
-        
-        function carregarStream() {
-            const streamUrl = '/playlist.m3u8';
+        if (Hls.isSupported()) {
+            const hls = new Hls({
+                debug: false,
+                enableWorker: false,
+                lowLatencyMode: true,
+                manifestLoadingTimeOut: 15000,
+                manifestLoadingMaxRetry: 5,
+                levelLoadingTimeOut: 15000,
+                levelLoadingMaxRetry: 5
+            });
             
-            if (Hls.isSupported()) {
-                if (window.hls) {
-                    window.hls.destroy();
+            hls.loadSource(streamUrl);
+            hls.attachMedia(video);
+            
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                console.log('✅ Stream carregado');
+                video.play().catch(e => console.log('Auto-play:', e));
+            });
+            
+            hls.on(Hls.Events.ERROR, (event, data) => {
+                console.error('HLS Error:', data.type, data.details);
+                if (data.fatal && data.type === 'networkError') {
+                    console.log('🔄 Tentando reconectar...');
+                    setTimeout(() => hls.loadSource(streamUrl), 3000);
                 }
-                
-                const hls = new Hls({
-                    debug: false,
-                    enableWorker: true,
-                    lowLatencyMode: true,
-                    manifestLoadingTimeOut: 15000,
-                    manifestLoadingMaxRetry: 4,
-                    manifestLoadingRetryDelay: 1000,
-                    levelLoadingTimeOut: 15000,
-                    levelLoadingMaxRetry: 4,
-                    levelLoadingRetryDelay: 1000
-                });
-                
-                hls.loadSource(streamUrl);
-                hls.attachMedia(video);
-                
-                hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    statusText.innerHTML = '▶️ AO VIVO';
-                    reconnectAttempts = 0;
-                    video.play().catch(e => console.log('Auto-play bloqueado:', e));
-                });
-                
-                hls.on(Hls.Events.ERROR, (event, data) => {
-                    console.error('HLS Error:', data);
-                    if (data.fatal) {
-                        reconnectAttempts++;
-                        const delay = Math.min(5000, reconnectAttempts * 1000);
-                        statusText.innerHTML = \`⚠️ Reconectando em \${delay/1000}s...\`;
-                        setTimeout(() => {
-                            carregarStream();
-                        }, delay);
-                    }
-                });
-                
-                window.hls = hls;
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = streamUrl;
-                statusText.innerHTML = '▶️ AO VIVO (Safari)';
-            } else {
-                statusText.innerHTML = '❌ Navegador não suporta HLS';
-            }
+            });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = streamUrl;
         }
-        
-        video.addEventListener('playing', () => {
-            statusText.innerHTML = '▶️ AO VIVO';
-        });
-        
-        video.addEventListener('pause', () => {
-            statusText.innerHTML = '⏸️ Pausado';
-        });
-        
-        video.addEventListener('waiting', () => {
-            statusText.innerHTML = '⏳ Carregando...';
-        });
-        
-        // Inicia
-        carregarStream();
     </script>
 </body>
 </html>
     `);
 });
 
-// Health check endpoint para Railway
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Inicia o servidor
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔═══════════════════════════════════════════════════╗
-║     🎲 BAC BO LIVE - PROXY RODANDO NO RAILWAY     ║
+║     🎲 BAC BO PROXY COMPLETO - RODANDO            ║
 ╠═══════════════════════════════════════════════════╣
-║   📡 Servidor rodando na porta: ${PORT}              ║
-║   ✅ Proxy ativo e pronto para uso                ║
+║   📡 Porta: ${PORT}                                 ║
+║   ✅ Proxy interceptando TODAS as requisições     ║
+║   🔗 Acesse: http://localhost:${PORT}               ║
 ╚═══════════════════════════════════════════════════╝
     `);
 });
