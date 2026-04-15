@@ -4,57 +4,63 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-const HEADERS = {
-    'Referer': 'https://www.casino.org/',
-    'Origin': 'https://www.casino.org',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-    'Accept': '*/*',
-    'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
-};
+// Lista de User-Agents reais (rotativos)
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
+];
+
+// Função para pegar User-Agent aleatório
+function getRandomUA() {
+    return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+// Headers base
+function getHeaders() {
+    return {
+        'Referer': 'https://www.casino.org/',
+        'Origin': 'https://www.casino.org',
+        'User-Agent': getRandomUA(),
+        'Accept': '*/*',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'cross-site',
+        'Pragma': 'no-cache',
+        'Cache-Control': 'no-cache'
+    };
+}
 
 const STREAM_BASE = 'https://live101.egprom.com/app/30/';
 
-// FUNÇÃO CORRIGIDA para montar URL completa
-function buildFullUrl(encodedUrl) {
-    // Decodifica a URL
-    let decoded = decodeURIComponent(encodedUrl);
-    console.log(`  🔍 Decodificando: ${decoded.substring(0, 80)}...`);
-    
-    // Remove "com/app/30/" do início se existir
-    if (decoded.startsWith('com/app/30/')) {
-        decoded = decoded.substring('com/app/30/'.length);
-    }
-    
-    // Se já tem https, retorna direto
-    if (decoded.startsWith('https://')) {
-        return decoded;
-    }
-    
-    // Constrói URL completa
-    const fullUrl = STREAM_BASE + decoded;
-    console.log(`  ✅ URL final: ${fullUrl.substring(0, 100)}...`);
-    return fullUrl;
+// Delay aleatório entre requisições (evita detecção)
+function randomDelay() {
+    return new Promise(resolve => setTimeout(resolve, Math.random() * 500));
 }
 
 // Playlist principal
 app.get('/playlist.m3u8', async (req, res) => {
     console.log('📡 Playlist principal solicitada');
+    await randomDelay();
     
     try {
         const response = await axios.get(STREAM_BASE + 'amlst:bacbor1_bi_auto/playlist.m3u8', {
-            headers: HEADERS,
+            headers: getHeaders(),
             responseType: 'text',
-            timeout: 10000
+            timeout: 15000
         });
         
         let playlist = response.data;
         
-        // Reescreve URLs das playlists secundárias
+        // Reescreve URLs
         playlist = playlist.replace(/([a-zA-Z0-9_\/\-]+\.m3u8\?[^\s]+)/g, (match) => {
             const encoded = encodeURIComponent(match);
-            const newUrl = `/playlist?url=${encoded}`;
-            console.log(`  ↳ Playlist: ${match.substring(0, 50)}... → ${newUrl.substring(0, 50)}...`);
-            return newUrl;
+            return `/playlist?url=${encoded}`;
         });
         
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -64,33 +70,36 @@ app.get('/playlist.m3u8', async (req, res) => {
         
     } catch (error) {
         console.error('❌ Erro:', error.message);
+        if (error.response?.status === 418) {
+            console.log('  ⚠️ Bloqueado! Tentando novamente com outro User-Agent...');
+        }
         res.status(500).send('Erro ao carregar playlist');
     }
 });
 
-// Playlist secundária - VERSÃO CORRIGIDA
+// Playlist secundária
 app.get('/playlist', async (req, res) => {
     const encodedUrl = req.query.url;
     if (!encodedUrl) {
-        console.error('❌ URL não fornecida');
         return res.status(400).send('URL não fornecida');
     }
     
-    const fullUrl = buildFullUrl(encodedUrl);
-    console.log(`📡 Playlist secundária solicitada`);
+    await randomDelay();
+    
+    let decoded = decodeURIComponent(encodedUrl);
+    decoded = decoded.replace(/^com\/app\/30\//, '');
+    const fullUrl = STREAM_BASE + decoded;
+    
+    console.log(`📡 Playlist: ${fullUrl.substring(0, 80)}...`);
     
     try {
         const response = await axios.get(fullUrl, {
-            headers: HEADERS,
+            headers: getHeaders(),
             responseType: 'text',
-            timeout: 10000
+            timeout: 15000
         });
         
-        console.log(`  ✅ Resposta recebida (${response.data.length} bytes)`);
-        
         let playlist = response.data;
-        
-        // Reescreve segmentos .ts
         playlist = playlist.replace(/([a-zA-Z0-9_\-]+\.ts)/g, (match) => {
             return `/segment?url=${encodeURIComponent(match)}`;
         });
@@ -98,22 +107,21 @@ app.get('/playlist', async (req, res) => {
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(playlist);
+        console.log(`  ✅ Enviado (${playlist.length} bytes)`);
         
     } catch (error) {
-        console.error(`❌ Erro na playlist:`, error.message);
-        if (error.response) {
-            console.error(`  Status: ${error.response.status}`);
+        console.error(`❌ Erro:`, error.message);
+        if (error.response?.status === 418) {
+            console.log('  ⚠️ Servidor bloqueou esta requisição');
         }
-        res.status(502).send(`Erro: ${error.message}`);
+        res.status(502).send('Erro');
     }
 });
 
 // Segmentos .ts
 app.get('/segment', async (req, res) => {
     const segmentName = req.query.url;
-    if (!segmentName) {
-        return res.status(400).send('Nome do segmento não fornecido');
-    }
+    if (!segmentName) return res.status(400).send('No segment');
     
     const possiblePaths = [
         `amlst:bacbor1_bi_auto/${segmentName}`,
@@ -129,23 +137,21 @@ app.get('/segment', async (req, res) => {
             const response = await axios({
                 method: 'get',
                 url: fullUrl,
-                headers: HEADERS,
+                headers: getHeaders(),
                 responseType: 'stream',
-                timeout: 15000
+                timeout: 10000
             });
             
             res.setHeader('Content-Type', 'video/mp2t');
             res.setHeader('Access-Control-Allow-Origin', '*');
             response.data.pipe(res);
-            console.log(`  ✅ Segmento: ${path}`);
+            console.log(`  ✅ Segmento: ${path.substring(0, 50)}`);
             return;
-        } catch (error) {
-            // Tenta próximo
-        }
+        } catch(e) {}
     }
     
     console.error(`❌ Segmento não encontrado: ${segmentName}`);
-    res.status(404).send('Segmento não encontrado');
+    res.status(404).send('Not found');
 });
 
 // Página HTML
@@ -158,27 +164,64 @@ app.get('/', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        video { width: 100%; max-width: 1200px; height: auto; }
-        .info { position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: #0f0; padding: 5px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; }
+        video { width: 100%; max-width: 1200px; height: auto; background: #000; }
+        .info { position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: #0f0; padding: 5px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; z-index: 100; }
+        .error { position: fixed; top: 10px; right: 10px; background: rgba(255,0,0,0.7); color: white; padding: 5px 10px; border-radius: 5px; font-family: monospace; font-size: 11px; display: none; z-index: 100; }
     </style>
 </head>
 <body>
     <video id="video" controls autoplay playsinline></video>
-    <div class="info">🎲 Bac Bo Live</div>
+    <div class="info">🎲 Bac Bo Live | Railway Proxy</div>
+    <div class="error" id="errorMsg"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
         const video = document.getElementById('video');
+        const errorDiv = document.getElementById('errorMsg');
+        let retryCount = 0;
         
-        if (Hls.isSupported()) {
-            const hls = new Hls({ debug: false, enableWorker: false, lowLatencyMode: true });
-            hls.loadSource('/playlist.m3u8');
-            hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
-            hls.on(Hls.Events.ERROR, (e, d) => console.error('HLS Error:', d));
-        } else {
-            video.src = '/playlist.m3u8';
+        function showError(msg) {
+            errorDiv.innerHTML = msg;
+            errorDiv.style.display = 'block';
+            setTimeout(() => { errorDiv.style.display = 'none'; }, 4000);
         }
+        
+        function loadStream() {
+            if (Hls.isSupported()) {
+                const hls = new Hls({ 
+                    debug: false, 
+                    enableWorker: false, 
+                    lowLatencyMode: true,
+                    manifestLoadingTimeOut: 15000,
+                    manifestLoadingMaxRetry: 3
+                });
+                
+                hls.loadSource('/playlist.m3u8');
+                hls.attachMedia(video);
+                
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    console.log('✅ Stream loaded');
+                    video.play().catch(e => console.log('Auto-play:', e));
+                    retryCount = 0;
+                });
+                
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    console.error('HLS Error:', data.type, data.details);
+                    if (data.fatal && data.type === 'networkError') {
+                        retryCount++;
+                        const delay = Math.min(5000, retryCount * 1000);
+                        showError(\`Reconectando em \${delay/1000}s...\`);
+                        setTimeout(() => loadStream(), delay);
+                    }
+                });
+                
+                window.hls = hls;
+            } else {
+                video.src = '/playlist.m3u8';
+            }
+        }
+        
+        loadStream();
     </script>
 </body>
 </html>
@@ -188,9 +231,10 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔═══════════════════════════════════════════════════╗
-║     🎲 BAC BO PROXY CORRIGIDO - RODANDO           ║
+║     🎲 BAC BO PROXY - RAILWAY EDITION             ║
 ╠═══════════════════════════════════════════════════╣
 ║   📡 Porta: ${PORT}                                 ║
+║   🔄 User-Agent rotativo ativo                    ║
 ║   🔗 Acesse: https://live-production-9fc7.up.railway.app ║
 ╚═══════════════════════════════════════════════════╝
     `);
